@@ -50,36 +50,86 @@ function Dashboard() {
     fetchData();
   }, []);
 
+  const applyBudgetData = (budgetData) => {
+    if (!budgetData) {
+      return;
+    }
+
+    setBudgetInfo({
+      monthKey: budgetData.monthKey || '',
+      amount: toNumber(budgetData.amount),
+      spent: toNumber(budgetData.spent),
+      remaining: toNumber(budgetData.remaining),
+      exceeded: !!budgetData.exceeded,
+      alertLevel: budgetData.alertLevel || 'none',
+    });
+    setBudgetInput(String(toNumber(budgetData.amount) || ''));
+  };
+
+  const applyProfileData = (profileData) => {
+    if (!profileData) {
+      return;
+    }
+
+    setProfileForm((prev) => ({
+      ...prev,
+      name: profileData.name || '',
+      email: profileData.email || '',
+      password: '',
+    }));
+  };
+
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [txRes, budgetRes, profileRes] = await Promise.all([
+
+      const [txResult, budgetResult, profileResult] = await Promise.allSettled([
         transactionAPI.getAll(),
         budgetAPI.getCurrent(),
         profileAPI.get(),
       ]);
 
-      setTransactions(Array.isArray(txRes.data) ? txRes.data : []);
-      setBudgetInfo({
-        monthKey: budgetRes.data?.monthKey || '',
-        amount: toNumber(budgetRes.data?.amount),
-        spent: toNumber(budgetRes.data?.spent),
-        remaining: toNumber(budgetRes.data?.remaining),
-        exceeded: !!budgetRes.data?.exceeded,
-        alertLevel: budgetRes.data?.alertLevel || 'none',
-      });
-      setBudgetInput(String(toNumber(budgetRes.data?.amount) || ''));
-      setProfileForm({
-        name: profileRes.data?.name || '',
-        email: profileRes.data?.email || '',
-        password: '',
-      });
-      setError('');
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to load data');
+      if (txResult.status === 'fulfilled') {
+        setTransactions(Array.isArray(txResult.value.data) ? txResult.value.data : []);
+      } else {
+        setTransactions([]);
+      }
+
+      if (budgetResult.status === 'fulfilled') {
+        applyBudgetData(budgetResult.value.data);
+      }
+
+      if (profileResult.status === 'fulfilled') {
+        applyProfileData(profileResult.value.data);
+      }
+
+      const firstFailure = [txResult, budgetResult, profileResult].find((result) => result.status === 'rejected');
+      if (firstFailure) {
+        setError(firstFailure.reason?.response?.data?.message || 'Some data could not be loaded');
+      } else {
+        setError('');
+      }
     } finally {
       setLoading(false);
     }
+  };
+
+  const transactionMatchesFilters = (tx) => {
+    const normalizedSearch = filters.search.toLowerCase().trim();
+    const startDate = filters.startDate ? new Date(`${filters.startDate}T00:00:00`) : null;
+    const endDate = filters.endDate ? new Date(`${filters.endDate}T23:59:59.999`) : null;
+
+    const txDate = safeDate(tx.date);
+    const txTitle = String(tx.title || '').toLowerCase();
+    const txCategory = tx.category || 'General';
+
+    const matchesSearch = !normalizedSearch || txTitle.includes(normalizedSearch);
+    const matchesType = filters.type === 'all' || tx.type === filters.type;
+    const matchesCategory = filters.category === 'all' || txCategory === filters.category;
+    const matchesStartDate = !startDate || (txDate && txDate >= startDate);
+    const matchesEndDate = !endDate || (txDate && txDate <= endDate);
+
+    return matchesSearch && matchesType && matchesCategory && matchesStartDate && matchesEndDate;
   };
 
   const handleSaveProfile = async () => {
@@ -93,20 +143,13 @@ function Dashboard() {
 
     try {
       setProfileSaving(true);
-      const payload = {
-        name,
-        email,
-      };
+      const payload = { name, email };
       if (profileForm.password.trim()) {
         payload.password = profileForm.password.trim();
       }
 
       const res = await profileAPI.update(payload);
-      setProfileForm({
-        name: res.data?.name || name,
-        email: res.data?.email || email,
-        password: '',
-      });
+      applyProfileData(res.data);
       setError('');
       setActionMessage('Profile saved successfully.');
     } catch (err) {
@@ -126,22 +169,20 @@ function Dashboard() {
 
       if (createdTransaction && createdTransaction._id) {
         setTransactions((prev) => [createdTransaction, ...prev]);
+        if (transactionMatchesFilters(createdTransaction)) {
+          setActionMessage('Transaction added successfully.');
+        } else {
+          setActionMessage('Transaction added successfully. It may be hidden by current filters.');
+        }
+      } else {
+        setActionMessage('Transaction added successfully.');
       }
-
-      setActionMessage('Transaction added successfully.');
 
       try {
         const budgetRes = await budgetAPI.getCurrent();
-        setBudgetInfo({
-          monthKey: budgetRes.data?.monthKey || '',
-          amount: toNumber(budgetRes.data?.amount),
-          spent: toNumber(budgetRes.data?.spent),
-          remaining: toNumber(budgetRes.data?.remaining),
-          exceeded: !!budgetRes.data?.exceeded,
-          alertLevel: budgetRes.data?.alertLevel || 'none',
-        });
+        applyBudgetData(budgetRes.data);
       } catch (budgetErr) {
-        // Transaction add succeeded; keep UI usable even if budget refresh fails.
+        // Keep add flow successful even if budget refresh fails.
       }
     } catch (err) {
       const message = err.response?.data?.message || 'Failed to add transaction';
@@ -174,14 +215,7 @@ function Dashboard() {
     try {
       const res = await budgetAPI.setCurrent(amount);
       const nextAmount = toNumber(res.data?.amount);
-      setBudgetInfo({
-        monthKey: res.data?.monthKey || '',
-        amount: nextAmount,
-        spent: toNumber(res.data?.spent),
-        remaining: toNumber(res.data?.remaining),
-        exceeded: !!res.data?.exceeded,
-        alertLevel: res.data?.alertLevel || 'none',
-      });
+      applyBudgetData(res.data);
       setActionMessage(`Monthly budget saved: $${nextAmount.toFixed(2)}`);
       setError('');
     } catch (err) {
@@ -216,23 +250,7 @@ function Dashboard() {
   }, [transactions]);
 
   const filteredTransactions = useMemo(() => {
-    const normalizedSearch = filters.search.toLowerCase().trim();
-    const startDate = filters.startDate ? new Date(`${filters.startDate}T00:00:00`) : null;
-    const endDate = filters.endDate ? new Date(`${filters.endDate}T23:59:59.999`) : null;
-
-    return transactions.filter((tx) => {
-      const txDate = safeDate(tx.date);
-      const txTitle = String(tx.title || '').toLowerCase();
-      const txCategory = tx.category || 'General';
-
-      const matchesSearch = !normalizedSearch || txTitle.includes(normalizedSearch);
-      const matchesType = filters.type === 'all' || tx.type === filters.type;
-      const matchesCategory = filters.category === 'all' || txCategory === filters.category;
-      const matchesStartDate = !startDate || (txDate && txDate >= startDate);
-      const matchesEndDate = !endDate || (txDate && txDate <= endDate);
-
-      return matchesSearch && matchesType && matchesCategory && matchesStartDate && matchesEndDate;
-    });
+    return transactions.filter((tx) => transactionMatchesFilters(tx));
   }, [transactions, filters]);
 
   const filteredSummary = useMemo(() => {
@@ -305,13 +323,7 @@ function Dashboard() {
         const date = safeDate(tx.date);
         const formattedDate = date ? date.toLocaleString() : '';
 
-        return [
-          tx.title || '',
-          tx.category || 'General',
-          tx.type || '',
-          amount,
-          formattedDate,
-        ];
+        return [tx.title || '', tx.category || 'General', tx.type || '', amount, formattedDate];
       });
 
       const csvContent = [headers, ...rows]
@@ -435,7 +447,7 @@ function Dashboard() {
           monthlyIncome={monthlyInsights.monthlyIncome}
           monthlyExpense={monthlyInsights.monthlyExpense}
           topExpenseCategory={monthlyInsights.topExpenseCategory}
-          totalTransactions={filteredTransactions.length}
+          totalTransactions={transactions.length}
         />
 
         <ChartSection transactions={transactions} />
@@ -500,11 +512,8 @@ function Dashboard() {
           </div>
         </div>
 
-        <h2 className="text-2xl font-bold mb-4 text-gray-800 dark:text-white">Transaction History</h2>
-        <TransactionList
-          transactions={filteredTransactions}
-          onDelete={handleDeleteTransaction}
-        />
+        <h2 className="text-2xl font-bold mb-4 text-gray-800 dark:text-white">All Transaction History</h2>
+        <TransactionList transactions={transactions} onDelete={handleDeleteTransaction} />
       </div>
     </div>
   );

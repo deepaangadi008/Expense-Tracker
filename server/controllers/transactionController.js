@@ -11,35 +11,59 @@ const addInterval = (date, frequency) => {
   return next;
 };
 
+const validRecurring = new Set(['weekly', 'monthly', 'yearly']);
+
 // @desc    Add new transaction
 // @route   POST /api/transactions
 // @access  Private
 const addTransaction = async (req, res) => {
   const { title, amount, type, date, category, isRecurring, recurringFrequency } = req.body;
-  if (!title || !amount || !type || !date) {
-    return res.status(400).json({ message: 'All fields are required' });
+
+  const normalizedTitle = String(title || '').trim();
+  const parsedAmount = Number(amount);
+  const parsedDate = new Date(date);
+  const normalizedType = String(type || '').trim();
+  const normalizedCategory = String(category || 'General').trim() || 'General';
+  const recurring = Boolean(isRecurring);
+
+  if (!normalizedTitle || !normalizedType || !date) {
+    return res.status(400).json({ message: 'Title, type and date are required' });
   }
-  if (isRecurring && !recurringFrequency) {
-    return res.status(400).json({ message: 'Recurring frequency is required' });
+
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    return res.status(400).json({ message: 'Amount must be greater than 0' });
+  }
+
+  if (!['income', 'expense'].includes(normalizedType)) {
+    return res.status(400).json({ message: 'Type must be income or expense' });
+  }
+
+  if (Number.isNaN(parsedDate.getTime())) {
+    return res.status(400).json({ message: 'Please provide a valid date/time' });
+  }
+
+  if (recurring && !validRecurring.has(recurringFrequency)) {
+    return res.status(400).json({ message: 'Recurring frequency must be weekly, monthly, or yearly' });
   }
 
   try {
-    const txDate = new Date(date);
-    const frequency = isRecurring ? recurringFrequency : null;
+    const frequency = recurring ? recurringFrequency : null;
+
     const tx = await Transaction.create({
       user: req.user._id,
-      title,
-      amount,
-      type,
-      category: category || 'General',
-      date: txDate,
-      isRecurringTemplate: !!isRecurring,
+      title: normalizedTitle,
+      amount: parsedAmount,
+      type: normalizedType,
+      category: normalizedCategory,
+      date: parsedDate,
+      isRecurringTemplate: recurring,
       recurringFrequency: frequency,
-      nextRecurringDate: frequency ? addInterval(txDate, frequency) : null,
+      nextRecurringDate: frequency ? addInterval(parsedDate, frequency) : null,
     });
-    res.status(201).json(tx);
+
+    return res.status(201).json(tx);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to add transaction' });
+    return res.status(500).json({ message: 'Failed to add transaction' });
   }
 };
 
